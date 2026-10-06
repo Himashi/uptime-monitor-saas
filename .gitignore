@@ -1,0 +1,13 @@
+# Virtual environment
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local SQLite database
+uptime.db
+
+# VS Code settings
+.vscode/
