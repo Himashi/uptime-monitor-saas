@@ -1,13 +1,15 @@
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from typing import List
 from contextlib import asynccontextmanager
 
 from .database import engine, Base, get_db
 from .models import User, MonitoredEndpoint, PingLog
-from .schemas import UserCreate, UserResponse, EndpointCreate, EndpointResponse, PingLogResponse
+from .schemas import UserCreate, UserResponse, EndpointCreate, EndpointResponse, PingLogResponse, Token
 from .monitor import check_endpoint_health
 from .scheduler import start_scheduler, shutdown_scheduler
+from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 
 # Manage startup and shutdown events cleanly in FastAPI
 @asynccontextmanager
@@ -25,7 +27,7 @@ app = FastAPI(title="Uptime Monitor SaaS API", version="1.0.0", lifespan=lifespa
 def read_root():
     return {
         "status": "online",
-        "message": "Welcome to the Uptime Monitor SaaS API with Background Worker!",
+        "message": "Welcome to the Uptime Monitor SaaS API with Background Worker & JWT Auth!",
         "docs": "/docs"
     }
 
@@ -35,23 +37,34 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    new_user = User(email=user.email, hashed_password=user.password)
+    # Hash the password before storing it in the database
+    hashed_pass = get_password_hash(user.password)
+    new_user = User(email=user.email, hashed_password=hashed_pass)
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
 
-@app.post("/endpoints/", response_model=EndpointResponse, status_code=status.HTTP_201_CREATED)
-def create_endpoint(endpoint: EndpointCreate, user_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+@app.post("/token", response_model=Token)
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
 
+@app.post("/endpoints/", response_model=EndpointResponse, status_code=status.HTTP_201_CREATED)
+def create_endpoint(endpoint: EndpointCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Automatically tie the endpoint to the authenticated user via JWT token
     db_endpoint = MonitoredEndpoint(
         name=endpoint.name,
         url=endpoint.url,
         interval_seconds=endpoint.interval_seconds,
-        user_id=user_id
+        user_id=current_user.id
     )
     db.add(db_endpoint)
     db.commit()
